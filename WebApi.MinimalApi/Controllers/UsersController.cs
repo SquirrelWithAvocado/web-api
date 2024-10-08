@@ -1,6 +1,10 @@
-﻿using AutoMapper;
+﻿using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using AutoMapper;
 using Microsoft.AspNetCore.JsonPatch;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Newtonsoft.Json;
 using WebApi.MinimalApi.Domain;
 using WebApi.MinimalApi.Models;
 
@@ -12,14 +16,16 @@ public class UsersController : Controller
 {
     private readonly IUserRepository userRepository;
     private readonly IMapper mapper;
-    public UsersController(IUserRepository userRepository, IMapper mapper)
+    private readonly LinkGenerator linkGenerator;
+    public UsersController(IUserRepository userRepository, IMapper mapper, LinkGenerator linkGenerator)
     {
         this.userRepository = userRepository;
         this.mapper = mapper;
+        this.linkGenerator = linkGenerator;
     }
 
-    [HttpGet("{userId}", Name = nameof(GetUserById))]
     [HttpHead("{userId}")]
+    [HttpGet("{userId}", Name = nameof(GetUserById))]
     [Produces("application/json", "application/xml")]
     public ActionResult<UserDto> GetUserById([FromRoute] Guid userId)
     {
@@ -28,8 +34,53 @@ public class UsersController : Controller
         if (possibleUser == null)
             return NotFound();
 
+        if (HttpContext.Request.Method == HttpMethods.Head)
+        {
+            HttpContext.Response.Headers.Add("Content-Type", "application/json; charset=utf-8");
+            return Ok();
+        }
+
         var userDto = mapper.Map<UserDto>(possibleUser);
         return Ok(userDto);
+    }
+
+    [HttpGet(Name = nameof(GetUsers))]
+    [Produces("application/json", "application/xml")]
+    public ActionResult<IEnumerable<UserDto>> GetUsers(
+        [FromQuery] [Range(1, int.MaxValue)] [DefaultValue(1)]
+        int pageNumber,
+        [FromQuery] [Range(1, 20)] [DefaultValue(10)]
+        int pageSize)
+    {
+        if (ModelState.GetFieldValidationState("pageNumber") == ModelValidationState.Invalid) pageNumber = 1;
+
+        if (ModelState.GetFieldValidationState("pageSize") == ModelValidationState.Invalid)
+        {
+            if (pageSize < 1) pageSize = 1;
+            else if (pageSize > 20) pageSize = 20;
+        }
+
+
+        var pageList = userRepository.GetPage(pageNumber, pageSize);
+        var users = mapper.Map<IEnumerable<UserDto>>(pageList);
+
+        var paginationHeader = new
+        {
+            previousPageLink = pageList.CurrentPage == 1
+                ? null
+                : linkGenerator.GetUriByRouteValues(HttpContext, nameof(GetUsers), new { pageNumber = pageNumber - 1, pageSize }),
+            nextPageLink = pageList.CurrentPage == pageList.TotalPages
+                ? null
+                : linkGenerator.GetUriByRouteValues(HttpContext, nameof(GetUsers), new { pageNumber = pageNumber + 1, pageSize }),
+            totalCount = pageList.TotalCount,
+            pageSize = pageList.PageSize,
+            currentPage = pageList.CurrentPage,
+            totalPages = pageList.TotalPages,
+        };
+
+        Response.Headers.Add("X-Pagination", JsonConvert.SerializeObject(paginationHeader));
+
+        return Ok(users);
     }
 
     [HttpPost]
@@ -40,7 +91,6 @@ public class UsersController : Controller
             return BadRequest();
         if (user.Login == null)
         {
-
             return UnprocessableEntity(ModelState);
         }
 
@@ -92,7 +142,7 @@ public class UsersController : Controller
 
         if (user == null)
             return NotFound();
-        
+
         var updateUserDto = mapper.Map<UpdateUserDto>(user);
 
         patchDoc.ApplyTo(updateUserDto, ModelState);
@@ -105,4 +155,26 @@ public class UsersController : Controller
         return NoContent();
     }
 
+    [HttpDelete("{userId}")]
+    public IActionResult DeleteUser([FromRoute] Guid userId)
+    {
+        var user = userRepository.FindById(userId);
+
+        if (user == null)
+        {
+            return NotFound();
+        }
+
+        userRepository.Delete(userId);
+        return NoContent();
+    }
+
+    [HttpOptions]
+    public IActionResult GetAllMethods()
+    {
+        Response.Headers.Add("Allow", new[] { "GET", "POST", "OPTIONS" });
+
+        return Ok();
+    }
 }
+
